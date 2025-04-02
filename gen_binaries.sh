@@ -1,47 +1,70 @@
 #!/bin/bash
-#set -e
+set -e
 
 #############
 # TODO
-#  * allow the user to input their desired input set
 #  * auto-handle output file generation
 
-if [ -z  "$SPEC_DIR" ]; then 
-   echo "  Please set the SPEC_DIR environment variable to point to your copy of SPEC CPU2006."
+if [ -z  "$SPEC_DIR" ]; then
+   echo "  Please set the SPEC_DIR environment variable to point to your copy of SPEC CPU2017."
    exit 1
 fi
 
+# NB: Use the same name in the config "label" as the config filename. See line 33 *.cfg
 CONFIG=riscv
 CONFIGFILE=${CONFIG}.cfg
-RUN="spike pk -c "
-CMD_FILE=commands.txt
-INPUT_TYPE=test
 
-# the integer set
-BENCHMARKS=(400.perlbench 401.bzip2 403.gcc 429.mcf 445.gobmk 456.hmmer 458.sjeng 462.libquantum 464.h264ref 471.omnetpp 473.astar 483.xalancbmk)
+# The config used to compile for the host machine
+H_CONFIG=host
+H_CONFIGFILE=${H_CONFIG}.cfg
 
+# Output redirection redirection to files (names match a spec run)
+REDIRECT=false
+
+# CML arguments
 # idiomatic parameter and option handling in sh
 compileFlag=false
-runFlag=false
-copyFlag=false
+genCommandsFlag=false
+
+# intrate, fprate, intspeed, fpspeed
+# Supersets spec{speed,rate}, and all, are not supported
+suite_type=intspeed
+
+# ref, train, test
+input_type=ref
+
+function usage
+{
+    echo "usage: gen_binaries.sh [--compile | --genCommands] [-H | -h | --help] [--suite [intspeed | intrate | fpspeed | fprate] | --input [train | test | ref]]"
+}
+
 while test $# -gt 0
 do
    case "$1" in
-        --compile) 
+        --compile)
             compileFlag=true
             ;;
-        --run) 
-            runFlag=true
+        --genCommands)
+            genCommandsFlag=true
             ;;
-        --copy)
-            copyFlag=true
+        --suite)
+            shift;
+            suite_type=$1
+            ;;
+        --input)
+            shift;
+            input_type=$1
+            ;;
+        -h | -H | -help)
+            usage
+            exit
             ;;
         --*) echo "ERROR: bad option $1"
-            echo "  --compile (compile the SPEC benchmarks), --run (to run the benchmarks) --copy (copies, not symlinks, benchmarks to a new dir)"
+            usage
             exit 1
             ;;
         *) echo "ERROR: bad argument $1"
-            echo "  --compile (compile the SPEC benchmarks), --run (to run the benchmarks) --copy (copies, not symlinks, benchmarks to a new dir)"
+            usage
             exit 2
             ;;
     esac
@@ -50,100 +73,122 @@ done
 
 echo "== Speckle Options =="
 echo "  Config : " ${CONFIG}
-echo "  Input  : " ${INPUT_TYPE}
+echo "  Suite  : " ${suite_type}
+echo "  Input  : " ${input_type}
 echo "  compile: " $compileFlag
-echo "  run    : " $runFlag
-echo "  copy   : " $copyFlag
+echo "  genCmd : " $genCommandsFlag
 echo ""
 
 
-BUILD_DIR=$PWD/build
-COPY_DIR=$PWD/${CONFIG}-spec-${INPUT_TYPE}
+# Directory into which speckle will dump logs and the overlay
+build_dir=$PWD/build
+overlay_dir=$build_dir/overlay
+
+if [[ $suite_type == *"speed"* ]]; then
+   prefix="6"
+   class="speed"
+   suffix="_s"
+else
+   prefix="5"
+   class="rate"
+   suffix="_r"
+fi
+
+benchmarks=$(basename -s .${input_type}.cmd --multiple $(pwd)/commands/${suite_type}/*."${input_type}".cmd)
 mkdir -p build;
 
 # compile the binaries
 if [ "$compileFlag" = true ]; then
    echo "Compiling SPEC..."
+   # TODO: deal with scrubbing properly
+   #cd $SPEC_DIR; . ./shrc; time runcpu --config ${CONFIG} --action scrub ${suite_type}
+
    # copy over the config file we will use to compile the benchmarks
-   cp $BUILD_DIR/../${CONFIGFILE} $SPEC_DIR/config/${CONFIGFILE}
-   cd $SPEC_DIR; . ./shrc; time runspec --config ${CONFIG} --size ${INPUT_TYPE} --action setup int
-#   cd $SPEC_DIR; . ./shrc; time runspec --config ${CONFIG} --size ${INPUT_TYPE} --action scrub int
+   cp $build_dir/../${CONFIGFILE} $SPEC_DIR/config
+   cp $build_dir/../${H_CONFIGFILE} $SPEC_DIR/config
+   echo "Compiling target SPEC with config: ${CONFIGFILE}"
+   cd $SPEC_DIR; . ./shrc; time runcpu --verbose 10 --config ${CONFIG} --size ${input_type} \
+      --action build ${suite_type} > ${build_dir}/${CONFIG}-${suite_type}-build.log
+   echo "Compiling host SPEC and generating inputs with config: ${H_CONFIGFILE}"
+   cd $SPEC_DIR; . ./shrc; time runcpu --verbose 10 --config ${H_CONFIG} --size ${input_type} \
+      --action runsetup ${suite_type} > ${build_dir}/${H_CONFIG}-${suite_type}-build.log
 
-   if [ "$copyFlag" = true ]; then
-      rm -rf $COPY_DIR
-      mkdir -p $COPY_DIR
-   fi
+   for b in ${benchmarks[@]}; do
+      output_dir=${overlay_dir}/${suite_type}/${input_type}/$b
+      mkdir -p $output_dir
+      bmark_base_dir=$SPEC_DIR/benchspec/CPU/$b
+      unprefixed=${b:4}
+      b_short_name=${unprefixed/%_[sr]/}
 
-   # copy back over the binaries.  Fuck xalancbmk for being different.
-   # Do this for each input type.
-   # assume the CPU2006 directories are clean. I've hard-coded the directories I'm going to copy out of
-   for b in ${BENCHMARKS[@]}; do
-      echo ${b}
-      SHORT_EXE=${b##*.} # cut off the numbers ###.short_exe
-      if [ $b == "483.xalancbmk" ]; then 
-         SHORT_EXE=Xalan #WTF SPEC???
+      if [[ "${input_type}" == "ref" ]]; then
+         host_bmk_dir=${bmark_base_dir}/run/run_base_ref${class}_${H_CONFIG}-m64.0000;
+      else
+         host_bmk_dir=${bmark_base_dir}/run/run_base_${input_type}_${H_CONFIG}-m64.0000;
       fi
-      BMK_DIR=$SPEC_DIR/benchspec/CPU2006/$b/run/run_base_${INPUT_TYPE}_${CONFIG}.0000;
-      
-      echo ""
-      echo "ls $SPEC_DIR/benchspec/CPU2006/$b/run"
-      ls $SPEC_DIR/benchspec/CPU2006/$b/run
-      ls $SPEC_DIR/benchspec/CPU2006/$b/run/run_base_${INPUT_TYPE}_${CONFIG}.0000
-      echo ""
 
-      # make a symlink to SPEC (to prevent data duplication for huge input files)
-      echo "ln -sf $BMK_DIR $BUILD_DIR/${b}_${INPUT_TYPE}"
-      if [ -d $BUILD_DIR/${b}_${INPUT_TYPE} ]; then
-         echo "unlink $BUILD_DIR/${b}_${INPUT_TYPE}"
-         unlink $BUILD_DIR/${b}_${INPUT_TYPE}
+      # Copy the inputs from the host build
+      inputs=$(find "$host_bmk_dir"/* -maxdepth 0 ! -executable -o -type d)
+      for input in ${inputs[@]}; do
+         echo $input
+         cp -rf $input -T $output_dir/$(basename "$input")
+      done
+
+      if [[ $b == "523.xalancbmk_r" ]]; then
+         target_bin=`find $bmark_base_dir/exe/ -name "cpuxalan*${CONFIG}-64"`
+      else
+         target_bin=`find $bmark_base_dir/exe/ -name "*${b_short_name}*${CONFIG}-64"`
       fi
-      ln -sf $BMK_DIR $BUILD_DIR/${b}_${INPUT_TYPE}
+      cp -f ${target_bin} $output_dir/
 
-      if [ "$copyFlag" = true ]; then
-         echo "---- copying benchmarks ----- "
-         mkdir -p $COPY_DIR/$b
-         cp -r $BUILD_DIR/../commands $COPY_DIR/commands
-         cp $BUILD_DIR/../run.sh $COPY_DIR/run.sh
-         sed -i '4s/.*/INPUT_TYPE='${INPUT_TYPE}' #this line was auto-generated from gen_binaries.sh/' $COPY_DIR/run.sh
-         for f in $BMK_DIR/*; do
-            echo $f
-            if [[ -d $f ]]; then
-               cp -r $f $COPY_DIR/$b/$(basename "$f")
-            else
-               cp $f $COPY_DIR/$b/$(basename "$f")
-            fi
-         done
-         mv $COPY_DIR/$b/${SHORT_EXE}_base.${CONFIG} $COPY_DIR/$b/${SHORT_EXE}
-      fi
-   done
-fi
+      # Generate a run script
+      run_script=${output_dir}/run.sh
+      echo "#!/bin/bash" > ${run_script}
+      echo "#This script was generated by Speckle gen_binaries.sh" >> ${run_script}
 
-# running the binaries/building the command file
-# we could also just run through BUILD_DIR/CMD_FILE and run those...
-if [ "$runFlag" = true ]; then
-
-   for b in ${BENCHMARKS[@]}; do
-   
-      cd $BUILD_DIR/${b}_${INPUT_TYPE}
-      SHORT_EXE=${b##*.} # cut off the numbers ###.short_exe
-      # handle benchmarks that don't conform to the naming convention
-      if [ $b == "482.sphinx3" ]; then SHORT_EXE=sphinx_livepretend; fi
-      if [ $b == "483.xalancbmk" ]; then SHORT_EXE=Xalan; fi
-      
-      # read the command file
-      IFS=$'\n' read -d '' -r -a commands < $BUILD_DIR/../commands/${b}.${INPUT_TYPE}.cmd
-
+      IFS=$'\n' read -d '' -r -a commands < $build_dir/../commands/$suite_type/${b}.${input_type}.cmd || [ "${commands[0]}" ]
+      workload_idx=0
       for input in "${commands[@]}"; do
          if [[ ${input:0:1} != '#' ]]; then # allow us to comment out lines in the cmd files
-            echo "~~~Running ${b}"
-            echo "  ${RUN} ${SHORT_EXE}_base.${CONFIG} ${input}"
-            eval ${RUN} ${SHORT_EXE}_base.${CONFIG} ${input}
+            if [[ "$REDIRECT" = false ]]; then
+               input=${input% > *}
+            fi
+            workload_run_script=${output_dir}/run_workload${workload_idx}.sh
+            echo "#!/bin/bash" > ${workload_run_script}
+            message="echo 'Running: ./$(basename "${target_bin}") ${input}'"
+            cmd="./$(basename "${target_bin}") ${input}"
+            echo "$message" >> ${run_script}
+            echo "$message" >> ${workload_run_script}
+            echo "$cmd" >> ${run_script}
+            echo "$cmd" >> ${workload_run_script}
+            chmod +x $workload_run_script
+            workload_idx="$((workload_idx+1))"
          fi
       done
-   
+      chmod +x $run_script
    done
+   # Copy the master runscript into the overlay directory
+   cp ${build_dir}/../spec17-run-scripts/${suite_type}.sh ${overlay_dir}/${suite_type}/${input_type}
 
 fi
+
+# Produces the .cmd files for a benchmark suite
+# These files are committed, but can be regenereated with this command
+if [ "$genCommandsFlag" = true ]; then
+   # First do a fake run from which will extract the commands
+   log_file="${build_dir}/${suite_type}.${input_type}.fakerun.log"
+   cd $SPEC_DIR; . ./shrc; time runcpu --config=host.cfg --fake --verbose 9  --size ${input_type} --action=onlyrun ${suite_type} > $log_file
+
+   bmarks=(`grep -nE "Running [5-6]+" $log_file | grep -Eo '[0-9]+\.[0-9a-zA-Z_]+'`)
+   mkdir -p $build_dir/../commands/${suite_type}
+   echo ${bmarks}
+   for bmark in "${bmarks[@]}"; do
+      echo $bmark
+      start_line=`grep -nE "Running $bmark" $log_file | grep -Eo '^[0-9]+'`
+      end_line=`grep -nE "Run $bmark" $log_file | grep -Eo '^[0-9]+'`
+      sed "${start_line},${end_line}!d" $log_file | grep '^\.\./run_base' | sed 's/[^ ]* //' > ${build_dir}/../commands/${suite_type}/${bmark}.${input_type}.cmd
+   done
+fi
+
 
 echo ""
 echo "Done!"
