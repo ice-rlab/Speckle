@@ -57,11 +57,14 @@ for i in `seq 0 $[ ${copies} - 1 ]`; do
     cp -al $work_dir/$bmark_name ${work_dir}/copy-$i
 done
 
+echo "Finished creating run directories"
+
 # In some systems we might not support for our counter program; so optionally disable it 
 if [ -z "$DISABLE_COUNTERS" -a "$counters" -ne 0 ]; then
     start_counters
 fi
 
+echo "Starting run on ${bmark_name}..."
 for i in `seq 0 $[ ${copies} - 1 ]`; do
     cd $work_dir/copy-$i
     echo "name,RealTime,UserTime,KernelTime,copy" >> ~/output/${bmark_name}_${i}.csv
